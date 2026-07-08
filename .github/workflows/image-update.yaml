@@ -1,0 +1,145 @@
+name: Update SUSE image tag in rancher-logging chart
+
+# Triggered by repository_dispatch from the SUSE fork build pipelines
+# (logging-operator, config-reloader, fluent-bit) after a successful push
+# to rancher-main.
+#
+# Updates the component's tag in values.yaml.patch, bumps the package version,
+# and force-pushes to auto/rancher-logging-suse-updates, keeping a single PR
+# open. Requires CHARTS_DISPATCH_TOKEN to be set on each sender fork.
+
+on:
+  repository_dispatch:
+    types: [image-updated]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout or create update branch
+        run: |
+          BRANCH="auto/rancher-logging-suse-updates"
+          if git ls-remote --exit-code origin "$BRANCH" &>/dev/null; then
+            git checkout -b "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -b "$BRANCH" "origin/rancher-logging-4.10-suse1"
+          fi
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Update image tag in values.yaml.patch
+        env:
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          python3 - <<'EOF'
+          import re, os, sys
+
+          component = os.environ['COMPONENT']
+          tag = os.environ['TAG']
+
+          repo_map = {
+              'logging-operator': 'ghcr.io/manno/logging-operator',
+              'config-reloader':  'ghcr.io/manno/config-reloader',
+              'fluent-bit':       'ghcr.io/manno/fluent-bit',
+          }
+          repo = repo_map.get(component)
+          if not repo:
+              print(f'Unknown component: {component}', file=sys.stderr)
+              sys.exit(1)
+
+          patch_file = 'packages/rancher-logging/4.10/generated-changes/patch/values.yaml.patch'
+          with open(patch_file) as f:
+              lines = f.readlines()
+
+          new_lines = []
+          update_next = False
+          for line in lines:
+              if update_next:
+                  if re.match(r'\+\s+tag:', line):
+                      line = re.sub(r'(\+\s+tag:\s+)\S+', rf'\g<1>{tag}', line)
+                  update_next = False
+              if repo in line:
+                  update_next = True
+              new_lines.append(line)
+
+          with open(patch_file, 'w') as f:
+              f.writelines(new_lines)
+
+          print(f'Updated {component} → {tag}')
+          EOF
+
+      - name: Bump chart version in package.yaml
+        run: |
+          PKG="packages/rancher-logging/4.10/package.yaml"
+          python3 - <<'EOF'
+          import re
+
+          pkg_file = 'packages/rancher-logging/4.10/package.yaml'
+          with open(pkg_file) as f:
+              content = f.read()
+
+          m = re.search(r'^version:\s+(\S+)', content, re.MULTILINE)
+          version = m.group(1)
+          # Strip any existing -suseN suffix, bump the rancher number, re-add -suse1
+          version = re.sub(r'-suse\d+$', '', version)
+          version = re.sub(r'(rancher\.)(\d+)', lambda m: m.group(1) + str(int(m.group(2)) + 1), version)
+          version += '-suse1'
+          content = re.sub(r'^version:.*$', f'version: {version}', content, flags=re.MULTILINE)
+
+          with open(pkg_file, 'w') as f:
+              f.write(content)
+
+          print(f'Version → {version}')
+          EOF
+
+      - name: Commit and push
+        env:
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          git add \
+            packages/rancher-logging/4.10/generated-changes/patch/values.yaml.patch \
+            packages/rancher-logging/4.10/package.yaml
+          if git diff --cached --quiet; then
+            echo "No changes — tag already up to date"
+            exit 0
+          fi
+          git commit -m "Update ${COMPONENT} image to ${TAG}"
+          git push --force origin "${BRANCH}"
+
+      - name: Create or update PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          PR_NUM=$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR_NUM" ]; then
+            gh pr create \
+              --title "rancher-logging: update SUSE image tags" \
+              --body "Automated image tag updates for SUSE-based rancher-logging images.
+
+          Latest: \`${COMPONENT}\` → \`${TAG}\`" \
+              --head "${BRANCH}" \
+              --base main \
+              --label automated
+          else
+            gh pr edit "$PR_NUM" \
+              --body "Automated image tag updates for SUSE-based rancher-logging images.
+
+          Latest: \`${COMPONENT}\` → \`${TAG}\`"
+          fi
