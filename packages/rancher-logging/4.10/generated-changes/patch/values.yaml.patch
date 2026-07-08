@@ -12,7 +12,7 @@
 -
 -  # -- [Image pull policy](https://kubernetes.io/docs/concepts/containers/images/#updating-images) for updating already existing images on a node.
 +  repository: ghcr.io/manno/logging-operator
-+  tag: dev-1ac7739f
++  tag: dev-775aefe4
    pullPolicy: IfNotPresent
  
  env: []
@@ -192,17 +192,17 @@
 +images:
 +  config_reloader:
 +    repository: ghcr.io/manno/config-reloader
-+    tag: dev-e7126dbf
++    tag: dev-54f3a9a
 +  fluentbit:
 +    repository: ghcr.io/manno/fluent-bit
-+    tag: dev-1647f32fb
++    tag: dev-4a98803c1
 +  nodeagent_fluentbit:
 +    os: "windows"
 +    repository: rancher/fluent-bit
 +    tag: 3.1.8
 +  fluentbit_debug:
 +    repository: ghcr.io/manno/fluent-bit
-+    tag: dev-1647f32fb
++    tag: dev-4a98803c1
 +  fluentd:
 +    repository: rancher/mirrored-kube-logging-fluentd
 +    tag: v1.16-4.10-full
