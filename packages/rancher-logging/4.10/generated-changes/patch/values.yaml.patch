@@ -204,8 +204,8 @@
 +    repository: ghcr.io/manno/fluent-bit
 +    tag: dev-4a98803c1
 +  fluentd:
-+    repository: rancher/mirrored-kube-logging-fluentd
-+    tag: v1.16-4.10-full
++    repository: ghcr.io/manno/fluentd
++    tag: v1.16-4.10-full-suse
 +
 +additionalLoggingSources:
 +  rke:
