@@ -12,7 +12,7 @@
 -
 -  # -- [Image pull policy](https://kubernetes.io/docs/concepts/containers/images/#updating-images) for updating already existing images on a node.
 +  repository: ghcr.io/manno/logging-operator
-+  tag: dev-1ac7739f
++  tag: dev-775aefe4
    pullPolicy: IfNotPresent
  
  env: []
