@@ -192,7 +192,7 @@
 +images:
 +  config_reloader:
 +    repository: ghcr.io/manno/config-reloader
-+    tag: dev-e7126dbf
++    tag: dev-54f3a9a
 +  fluentbit:
 +    repository: ghcr.io/manno/fluent-bit
 +    tag: dev-1647f32fb
