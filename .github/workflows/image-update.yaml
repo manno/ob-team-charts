@@ -135,7 +135,7 @@ jobs:
 
           Latest: \`${COMPONENT}\` → \`${TAG}\`" \
               --head "${BRANCH}" \
-              --base main \
+              --base rancher-logging-4.10-suse1 \
               --label automated
           else
             gh pr edit "$PR_NUM" \
