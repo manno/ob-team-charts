@@ -1,8 +1,8 @@
 name: Update SUSE image tag in rancher-logging chart
 
 # Triggered by repository_dispatch from the SUSE fork build pipelines
-# (logging-operator, config-reloader, fluent-bit) after a successful push
-# to rancher-main.
+# (logging-operator, config-reloader, fluent-bit, fluentd) after a successful
+# push to rancher-main.
 #
 # Updates the component's tag in values.yaml.patch, bumps the package version,
 # and force-pushes to auto/rancher-logging-suse-updates, keeping a single PR
@@ -55,11 +55,19 @@ jobs:
               'logging-operator': 'ghcr.io/manno/logging-operator',
               'config-reloader':  'ghcr.io/manno/config-reloader',
               'fluent-bit':       'ghcr.io/manno/fluent-bit',
+              'fluentd':          'ghcr.io/manno/fluentd',
           }
+          # Upstream mirror repos we're migrating away from on first dispatch
+          migrate_from = {
+              'fluentd': 'rancher/mirrored-kube-logging-fluentd',
+          }
+
           repo = repo_map.get(component)
           if not repo:
               print(f'Unknown component: {component}', file=sys.stderr)
               sys.exit(1)
+
+          alias = migrate_from.get(component)
 
           patch_file = 'packages/rancher-logging/4.10/generated-changes/patch/values.yaml.patch'
           with open(patch_file) as f:
@@ -72,7 +80,9 @@ jobs:
                   if re.match(r'\+\s+tag:', line):
                       line = re.sub(r'(\+\s+tag:\s+)\S+', rf'\g<1>{tag}', line)
                   update_next = False
-              if repo in line:
+              if repo in line or (alias and alias in line):
+                  if alias and alias in line:
+                      line = line.replace(alias, repo)
                   update_next = True
               new_lines.append(line)
 
