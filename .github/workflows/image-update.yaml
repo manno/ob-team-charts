@@ -30,14 +30,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Checkout or create update branch
+      - name: Reset update branch to latest base
         run: |
           BRANCH="auto/rancher-logging-suse-updates"
-          if git ls-remote --exit-code origin "$BRANCH" &>/dev/null; then
-            git checkout -b "$BRANCH" "origin/$BRANCH"
-          else
-            git checkout -b "$BRANCH" "origin/rancher-logging-4.10-suse1"
-          fi
+          git checkout -b "$BRANCH" "origin/rancher-logging-4.10-suse1"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
 
       - name: Update image tag in values.yaml.patch
