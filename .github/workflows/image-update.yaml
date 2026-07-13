@@ -1,0 +1,237 @@
+name: Update SUSE image tag in rancher-logging chart
+
+# Triggered by repository_dispatch from the SUSE fork build pipelines
+# (logging-operator, config-reloader, fluent-bit, fluentd) after a successful
+# push to rancher-main.
+#
+# Pipeline (3 jobs):
+#   update  - rewrite the component tag in values.yaml.patch, bump the chart
+#             version, force-push auto/rancher-logging-suse-updates, open/update
+#             the rolling PR, then evaluate the auto-merge gate (criteria 1-4).
+#   verify  - render the chart (make render) and run the k3d smoke test. This is
+#             the "CI green" gate (criterion 5). It runs INSIDE this workflow
+#             rather than as PR status checks because PRs opened with
+#             GITHUB_TOKEN do not trigger on: pull_request workflows.
+#   merge   - if the gate passed AND verify passed, merge the PR with no human
+#             click. Otherwise leave the PR open with a comment stating why.
+#
+# Rationale: mechanical, bot-authored version bumps should be gated on inputs +
+# reproducibility, not on a human reading the diff. See
+#   docs/fork/presentation.md              (the pipeline this closes the loop on)
+#   rancher-architecture "UnRC toil in rancher/charts"  (gate-not-review policy)
+#   docs/fork/STATE.md                     (this workspace's automation patterns)
+#
+# Requirements:
+#   - CHARTS_DISPATCH_TOKEN set on each sender fork (to send the dispatch).
+#   - The 4 GHCR packages (logging-operator, config-reloader, fluent-bit,
+#     fluentd) are currently PUBLIC, so the smoke test pulls them anonymously
+#     and no pull secret is needed. If any package is ever made private, set a
+#     GHCR_PULL_TOKEN (+ optional GHCR_PULL_USER) secret on this repo; the
+#     verify job wires it through as the smoke test's imagePullSecret.
+
+on:
+  repository_dispatch:
+    types: [image-updated]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  BRANCH: auto/rancher-logging-suse-updates
+  BASE: rancher-logging-4.10-suse1
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_num: ${{ steps.pr.outputs.pr_num }}
+      changed: ${{ steps.commit.outputs.changed }}
+      gate_ok: ${{ steps.gate.outputs.gate_ok }}
+      gate_reason: ${{ steps.gate.outputs.gate_reason }}
+      component: ${{ github.event.client_payload.component }}
+      tag: ${{ github.event.client_payload.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Reset update branch to latest base
+        run: git checkout -b "$BRANCH" "origin/$BASE"
+
+      - name: Update image tag in values.yaml.patch
+        env:
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: python3 .github/workflows/image-update/update-image-tag.py
+
+      - name: Bump chart version in package.yaml
+        run: python3 .github/workflows/image-update/bump-version.py
+
+      - name: Commit and push
+        id: commit
+        env:
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          git add \
+            packages/rancher-logging/4.10/generated-changes/patch/values.yaml.patch \
+            packages/rancher-logging/4.10/package.yaml
+          if git diff --cached --quiet; then
+            echo "No changes -- tag already up to date"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "Update ${COMPONENT} image to ${TAG}"
+          git push --force origin "$BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update PR
+        id: pr
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          BODY="Automated image tag updates for SUSE-based rancher-logging images.
+
+          Latest: \`${COMPONENT}\` -> \`${TAG}\`
+
+          This PR auto-merges once the gate (author/label, input scope, tag
+          validity, reproducibility) and the k3d smoke test pass. If it stays
+          open, a gate comment explains why."
+          PR_NUM=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR_NUM" ]; then
+            PR_NUM=$(gh pr create \
+              --title "rancher-logging: update SUSE image tags" \
+              --body "$BODY" \
+              --head "$BRANCH" \
+              --base "$BASE" \
+              --label automated \
+              | grep -oE '[0-9]+$')
+          else
+            gh pr edit "$PR_NUM" --body "$BODY"
+          fi
+          echo "pr_num=$PR_NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate auto-merge gate (criteria 1-4)
+        id: gate
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ steps.pr.outputs.pr_num }}
+          COMPONENT: ${{ github.event.client_payload.component }}
+          TAG: ${{ github.event.client_payload.tag }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
+        run: bash .github/workflows/image-update/gate.sh
+
+  verify:
+    needs: update
+    if: needs.update.outputs.changed == 'true' && needs.update.outputs.gate_ok == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      verify_ok: ${{ steps.smoke.outputs.verify_ok }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: auto/rancher-logging-suse-updates
+          fetch-depth: 0
+
+      - name: Install helm, k3d, PyYAML
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          python3 -m pip install --quiet pyyaml
+
+      - name: Render chart, spin up k3d, run smoke test
+        id: smoke
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
+        run: |
+          set +e
+          rc=0
+
+          echo "::group::Render chart"
+          make render || rc=1
+          echo "::endgroup::"
+
+          CHART=$(ls -d charts/rancher-logging/4.10.0-rancher.*-suse1 2>/dev/null | sort -V | tail -1)
+          if [ -z "$CHART" ]; then
+            echo "no rendered suse chart found -- render failed"
+            echo "verify_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Rendered chart: $CHART"
+
+          # Test exactly the images baked into the rendered chart.
+          eval "$(python3 .github/workflows/image-update/derive-images.py "$CHART/values.yaml")"
+
+          echo "::group::Create k3d cluster"
+          k3d cluster create ci --wait --timeout 120s || rc=1
+          mkdir -p "$HOME/.kube"
+          k3d kubeconfig get ci > "$HOME/.kube/config"
+          export KUBECONFIG="$HOME/.kube/config"
+          echo "::endgroup::"
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::group::Smoke test"
+            CREATE_CRD=true SKIP_LOG_FLOW_TEST=1 \
+            GHCR_USER="${GHCR_PULL_USER:-manno}" GHCR_TOKEN="${GHCR_PULL_TOKEN:-}" \
+            CHART_REF="$CHART" \
+            bash dev-scripts/smoke-test-rancher-logging.sh || rc=1
+            echo "::endgroup::"
+          fi
+
+          k3d cluster delete ci >/dev/null 2>&1 || true
+
+          if [ "$rc" -eq 0 ]; then
+            echo "verify_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Never fail the run -- the merge job reads verify_ok and decides.
+          exit 0
+
+  merge:
+    needs: [update, verify]
+    if: always() && needs.update.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge or explain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ needs.update.outputs.pr_num }}
+          GATE_OK: ${{ needs.update.outputs.gate_ok }}
+          GATE_REASON: ${{ needs.update.outputs.gate_reason }}
+          VERIFY_OK: ${{ needs.verify.outputs.verify_ok }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          if [ -z "$PR_NUM" ]; then
+            echo "No PR to act on."
+            exit 0
+          fi
+
+          if [ "$GATE_OK" != "true" ]; then
+            echo "Gate failed: $GATE_REASON"
+            gh pr comment "$PR_NUM" --body "🚦 Auto-merge skipped — **gate failed**: ${GATE_REASON}. Leaving this PR open for human review."
+            exit 0
+          fi
+
+          if [ "$VERIFY_OK" != "true" ]; then
+            echo "Verify failed (result=$VERIFY_RESULT, verify_ok=$VERIFY_OK)"
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            gh pr comment "$PR_NUM" --body "🚦 Auto-merge skipped — **verification failed** (chart render / k3d smoke test). See [the run](${RUN_URL}). Leaving this PR open for human review."
+            exit 0
+          fi
+
+          echo "Gate + verify passed — merging PR #$PR_NUM"
+          gh pr merge "$PR_NUM" --squash --body "Mechanical SUSE image tag bump — gate + k3d smoke test passed."
